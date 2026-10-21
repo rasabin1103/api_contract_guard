@@ -1,0 +1,19 @@
+# Modelo de seguridad
+
+La configuración actual es un servicio local monousuario sin autenticación. Compose enlaza solo a loopback. No debe exponerse públicamente ni considerarse que la integración de seguridad con ASE esté terminada.
+
+Los uploads se limitan a 2 MiB por defecto. El middleware limita el multipart antes del parser, con 64 KiB adicionales para framing; el fichero tiene su propio límite exacto. La CLI lee como máximo límite+1 bytes. Solo se aceptan JSON/YAML UTF-8; se rechazan claves duplicadas, aliases/anchors y tags inseguros de YAML, valores no finitos, OpenAPI inválido y estructuras demasiado profundas/grandes.
+
+Todo `$ref` debe empezar por `#/`; se bloquean referencias remotas y de fichero antes de validar, incluso en componentes no utilizados. Se rechazan referencias dinámicas y componentes pathItems por limitaciones de cobertura. oasdiff utiliza además `--allow-external-refs=false`, un directorio temporal privado y una configuración vacía explícita. No se aceptan desde HTTP ejecutables, flags, comandos ni código del usuario.
+
+El motor se ejecuta con un array de argumentos, `shell=False`, timeout y versión verificada. Los contratos no forman parte de los argumentos. Se rechaza una salida mayor de 16 MiB después de capturarla; no es un límite duro de memoria del proceso. Compose añade límites de memoria/CPU y un usuario no root. Para cargas no confiables se necesitan workers aislados, límites de concurrencia, salida acotada durante streaming y bloqueo de egress. Las restricciones estructurales del parser no garantizan protección completa frente a abuso de CPU.
+
+No hay frontend propio ni proxy de presentación. CORS está deshabilitado entre orígenes por defecto (`[]`); Swagger funciona en el mismo origen. Si ASE llama directamente desde navegador, configura una allowlist concreta. Para integración servidor a servidor, CORS no es necesario. CORS no reemplaza autenticación ni permisos. No se aceptará una cabecera de organización o usuario como prueba de identidad.
+
+Los contratos, los informes y la base pueden contener información sensible de las APIs. No introduzcas secretos en ellos. Los logs evitan documentos y detalles de excepciones; protegen el volumen/backups y configura secretos mediante entorno. Cifrado y retención corresponden al operador. No publiques `.env`.
+
+Las dependencias están fijadas y CI ejecuta `pip-audit`. Los resultados son puntuales y deben revisarse antes de distribuir. La seguridad pública exige identidad, permisos, organización, cuotas y transporte seguro comprobados. Swagger es una herramienta de prueba y no un control de acceso; revisa su exposición cuando se integre en ASE.
+
+La validación de respuestas JSON es puntual: no persiste cuerpos ni informes, ni hace solicitudes al servidor descrito. Los errores no incluyen los valores reales; sus paths contienen nombres de propiedades. Se limita el request JSON o el conjunto multipart a `ACG_MAX_UPLOAD_BYTES` más hasta 64 KiB de framing; cada fichero tiene además el límite exacto. Se rechazan claves duplicadas y números no finitos antes de validar. Schema y datos tienen límites de profundidad/nodos, solo se permiten referencias locales y se rechazan `$id`, anchors, referencias dinámicas y dialectos personalizados.
+
+Los constraints de schemas no confiables se evalúan en un proceso separado con timeout y dos slots simultáneos por proceso API; el worker se termina si excede el tiempo. Linux añade un límite de espacio de direcciones de 512 MiB, mientras que Windows depende del host y del timeout. Se devuelven como máximo 100 errores. Estos controles no equivalen a un sandbox con egress denegado ni a aislamiento multiusuario. La selección/parsing del contrato sigue ocurriendo en el proceso API y las cargas públicas requieren una revisión adicional de recursos y autorización. La CLI existente sigue siendo exclusivamente para comparación de versiones.

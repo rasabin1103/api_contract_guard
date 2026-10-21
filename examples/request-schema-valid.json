@@ -1,0 +1,13 @@
+{
+  "schema": {
+    "type": "object",
+    "required": ["id", "nombre", "saldo"],
+    "properties": {
+      "id": {"type": "integer"},
+      "nombre": {"type": "string"},
+      "saldo": {"type": "number", "minimum": 0}
+    },
+    "additionalProperties": false
+  },
+  "response_body": {"id": 123, "nombre": "Ana", "saldo": 50.25}
+}
