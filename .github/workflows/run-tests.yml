@@ -1,0 +1,93 @@
+name: Run API Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'URL base accesible desde el runner'
+        required: true
+        type: string
+      auth_type:
+        description: 'Autenticación de las peticiones'
+        type: choice
+        default: none
+        options: [none, bearer, basic, api_key, custom]
+      method:
+        description: 'Método dinámico; vacío para ejecutar solo health'
+        type: choice
+        default: ''
+        options: ['', GET, POST, PUT, PATCH, DELETE]
+      endpoint:
+        description: 'Ruta relativa, por ejemplo /api/v1/projects'
+        type: string
+        default: ''
+      body:
+        description: 'Body JSON opcional; no introducir secretos aquí'
+        type: string
+        default: ''
+      headers:
+        description: 'Headers JSON puntuales sin secretos'
+        type: string
+        default: ''
+      params:
+        description: 'Query params JSON opcionales'
+        type: string
+        default: ''
+      expected_status:
+        description: 'Status esperado; vacío para solo reportar'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tools/api-tests/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r tools/api-tests/requirements.txt
+      - name: Run tests
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          HEALTH_ENDPOINT: ${{ vars.HEALTH_ENDPOINT }}
+          TIMEOUT: '10'
+          AUTH_TYPE: ${{ inputs.auth_type }}
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          AUTH_USERNAME: ${{ secrets.AUTH_USERNAME }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          API_KEY_HEADER: ${{ vars.API_KEY_HEADER }}
+          API_KEY_VALUE: ${{ secrets.API_KEY_VALUE }}
+          EXTRA_HEADERS: ${{ secrets.EXTRA_HEADERS }}
+          REQ_METHOD: ${{ inputs.method }}
+          REQ_ENDPOINT: ${{ inputs.endpoint }}
+          REQ_BODY: ${{ inputs.body }}
+          REQ_HEADERS: ${{ inputs.headers }}
+          REQ_PARAMS: ${{ inputs.params }}
+          REQ_EXPECTED_STATUS: ${{ inputs.expected_status }}
+        run: python -m pytest tools/api-tests/test_remote_api.py -v --tb=no --html=report.html --self-contained-html
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: report.html
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload dynamic request result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: request-result
+          path: request_result.json
+          if-no-files-found: ignore
+          retention-days: 7
