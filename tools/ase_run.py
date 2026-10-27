@@ -52,6 +52,15 @@ SETTINGS = Settings()
 MAX_BYTES = SETTINGS.max_upload_bytes
 
 
+KEYWORDS = {
+    "type", "properties", "required", "items", "enum", "const", "$ref", "allOf", "anyOf", "oneOf",
+    "not", "if", "then", "else", "format", "pattern", "minimum", "maximum", "exclusiveMinimum",
+    "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "uniqueItems",
+    "additionalProperties", "patternProperties", "prefixItems", "contains", "$defs", "definitions",
+    "multipleOf", "minProperties", "maxProperties", "dependentRequired", "propertyNames",
+}
+
+
 def env(name: str) -> str:
     return (os.environ.get(name) or "").strip()
 
@@ -90,6 +99,7 @@ HINTS = {
     "invalid_source": "Usa un adjunto, una URL https o una ruta relativa del repo.",
     "file_not_found": "Revisa la ruta dentro del repo.",
     "upload_too_large": "Reduce el archivo (maximo 2 MiB).",
+    "invalid_schema": "Pasa el JSON Schema directamente (el objeto con type/properties), sin envoltorios.",
     "unknown_mode": "Elige compare, validate_contract o validate_schema.",
 }
 
@@ -168,7 +178,12 @@ def run_compare() -> int:
     base = parse_specification(raw_a, name_a, MAX_BYTES)
     target = parse_specification(raw_b, name_b, MAX_BYTES)
     engine = OasdiffEngine(SETTINGS.oasdiff_path, SETTINGS.comparison_timeout)
-    findings = engine.compare(base.document, target.document)
+    all_findings = engine.compare(base.document, target.document)
+    # Por defecto se informa de TODO lo estructural (operaciones, parametros, campos
+    # de la respuesta y sus tipos, y `servers`). CG_SCOPE=structure omite `servers`.
+    scope = (env("CG_SCOPE") or "all").lower()
+    ignored = [f for f in all_findings if f.category == "servers"] if scope == "structure" else []
+    findings = [f for f in all_findings if f not in ignored]
     result, summary = summarize(findings)
     report = {
         "overall_result": result,
@@ -176,6 +191,8 @@ def run_compare() -> int:
         "baseline": {"file": name_a, "content_hash": base.content_hash},
         "candidate": {"file": name_b, "content_hash": target.content_hash},
         "engine": {"name": "oasdiff", "version": engine.version, "configuration": engine.configuration},
+        "scope": scope,
+        "ignored_findings": len(ignored),
         "findings": [f.to_dict() for f in findings],
     }
     verdict = {"breaking": "fail", "review_required": "warn", "compatible": "pass"}.get(str(result), "warn")
@@ -189,13 +206,14 @@ def run_compare() -> int:
         "compare",
         verdict,
         headline,
-        "Compatible no garantiza que los documentos sean identicos ni el comportamiento del servidor.",
+        "Se comparan la estructura y los tipos de los campos de peticion/respuesta, no los textos ni los valores de ejemplo. Compatible no garantiza el comportamiento del servidor."
+        + (f" Se omitieron {len(ignored)} cambio(s) de configuracion de servidores (URLs base)." if ignored else ""),
         metrics=[(k.replace("_", " "), v, sev_tone.get(k, "")) for k, v in summary.items() if isinstance(v, (int, str))],
         findings=[
             {
                 "severity": str(f.severity),
                 "title": f.description,
-                "location": f"{f.category} · {f.location}",
+                "location": f"{ {'response': 'respuesta', 'request': 'peticion', 'operation': 'operacion'}.get(f.category, f.category) } · {f.location}",
                 "detail": f.rule_id,
                 "hint": f.recommendation or "",
             }
@@ -297,9 +315,21 @@ def run_validate_contract() -> int:
 def run_validate_schema() -> int:
     name_s, raw_s = load(env("CG_SCHEMA"), "schema")
     name_r, raw_r = load(env("CG_RESPONSE"), "response")
-    report = validate_json_schema(
-        parse_json("schema", name_s, raw_s), parse_json("response", name_r, raw_r), SETTINGS.comparison_timeout
-    )
+    schema = parse_json("schema", name_s, raw_s)
+    notes: list[str] = []
+    # Error comun: envolver el esquema como {"schema": {...}}. Para JSON Schema, "schema"
+    # no es una palabra clave, asi que se ignora y CUALQUIER respuesta pasaria por valida.
+    if isinstance(schema, dict) and set(schema) == {"schema"} and isinstance(schema["schema"], dict):
+        schema = schema["schema"]
+        notes.append('El esquema venia envuelto en {"schema": ...}; se ha usado el contenido interno.')
+    if not isinstance(schema, (dict, bool)) or (isinstance(schema, dict) and not (set(schema) & KEYWORDS)):
+        fail(
+            "El archivo de esquema no contiene ninguna palabra clave de JSON Schema "
+            "(type, properties, required...). Con un esquema asi cualquier respuesta seria valida.",
+            "invalid_schema",
+        )
+    report = validate_json_schema(schema, parse_json("response", name_r, raw_r), SETTINGS.comparison_timeout)
+    report = {**report, "warnings": [*notes, *report.get("warnings", [])]}
     return render_validation(report, "Contract Guard · Validacion contra JSON Schema", "validate_schema")
 
 
