@@ -83,8 +83,44 @@ def write_report(title: str, data: dict, body_html: str = "") -> None:
     )
 
 
+HINTS = {
+    "missing_input": "Rellena todas las entradas obligatorias del modo elegido.",
+    "invalid_attachment": "Vuelve a adjuntar el archivo (.json, .yaml o .yml).",
+    "download_failed": "Comprueba que la URL https es publica y accesible.",
+    "invalid_source": "Usa un adjunto, una URL https o una ruta relativa del repo.",
+    "file_not_found": "Revisa la ruta dentro del repo.",
+    "upload_too_large": "Reduce el archivo (maximo 2 MiB).",
+    "unknown_mode": "Elige compare, validate_contract o validate_schema.",
+}
+
+
+def ase_block(mode, verdict, headline, explanation="", metrics=(), findings=(), inputs=(), truncated=False) -> dict:
+    """Bloque legible que ASE muestra como tarjeta de resultado."""
+    return {
+        "tool": "API Contract Guard",
+        "mode": mode,
+        "verdict": verdict,  # pass | warn | fail | error
+        "headline": headline,
+        "explanation": explanation,
+        "metrics": [{"label": a, "value": str(b), "tone": c} for a, b, c in metrics],
+        "findings": list(findings),
+        "inputs": [{"label": a, "value": str(b)} for a, b in inputs],
+        "truncated": truncated,
+    }
+
+
 def fail(message: str, code: str = "error") -> None:
-    write_report("Contract Guard · Error", {"error": {"code": code, "message": message}})
+    data = {
+        "error": {"code": code, "message": message},
+        "ase_result": ase_block(
+            env("CG_MODE") or "compare",
+            "error",
+            "La ejecucion no se pudo completar",
+            message,
+            findings=[{"severity": "error", "title": code, "detail": message, "hint": HINTS.get(code, "")}],
+        ),
+    }
+    write_report("Contract Guard · Error", data)
     print(f"ERROR [{code}]: {message}", file=sys.stderr)
     sys.exit(2)
 
@@ -142,6 +178,31 @@ def run_compare() -> int:
         "engine": {"name": "oasdiff", "version": engine.version, "configuration": engine.configuration},
         "findings": [f.to_dict() for f in findings],
     }
+    verdict = {"breaking": "fail", "review_required": "warn", "compatible": "pass"}.get(str(result), "warn")
+    headline = {
+        "breaking": "Cambios incompatibles: la version candidata rompe a los consumidores actuales",
+        "review_required": "Hay cambios que conviene revisar antes de publicar",
+        "compatible": "Compatible: no se detectan cambios que rompan a los consumidores",
+    }.get(str(result), str(result))
+    sev_tone = {"breaking": "error", "potentially_breaking": "warning", "non_breaking": "success"}
+    report["ase_result"] = ase_block(
+        "compare",
+        verdict,
+        headline,
+        "Compatible no garantiza que los documentos sean identicos ni el comportamiento del servidor.",
+        metrics=[(k.replace("_", " "), v, sev_tone.get(k, "")) for k, v in summary.items() if isinstance(v, (int, str))],
+        findings=[
+            {
+                "severity": str(f.severity),
+                "title": f.description,
+                "location": f"{f.category} · {f.location}",
+                "detail": f.rule_id,
+                "hint": f.recommendation or "",
+            }
+            for f in findings
+        ],
+        inputs=[("Referencia", name_a), ("Candidata", name_b), ("Motor", f"oasdiff {engine.version}")],
+    )
     cls = {"breaking": "bad", "review_required": "warn", "compatible": "ok"}.get(str(result), "muted")
     rows = "".join(
         f"<tr><td>{pill(str(f.severity), SEVERITY_CLASS.get(f.severity, 'muted'))}</td>"
@@ -167,7 +228,7 @@ def run_compare() -> int:
     return 1 if summary["breaking"] else 0
 
 
-def render_validation(report: dict, title: str) -> int:
+def render_validation(report: dict, title: str, mode: str = "validate") -> int:
     valid = bool(report.get("valid"))
     rows = "".join(
         f"<tr><td>{html.escape(str(e.get('path') or '(cuerpo)'))}</td><td>{html.escape(str(e.get('rule', '')))}</td>"
@@ -177,6 +238,30 @@ def render_validation(report: dict, title: str) -> int:
     table = f"<table><tr><th>Donde</th><th>Regla</th><th>Detalle</th></tr>{rows}</table>" if rows else ""
     trunc = "<p class='muted'>Solo se muestran los primeros errores; hay mas.</p>" if report.get("truncated") else ""
     warnings = "".join(f"<li>{html.escape(str(w))}</li>" for w in report.get("warnings", []))
+    errs = report.get("errors", [])
+    report = {
+        **report,
+        "ase_result": ase_block(
+            mode,
+            "pass" if valid else "fail",
+            "La respuesta cumple el esquema" if valid else f"La respuesta NO cumple ({len(errs)} error(es))",
+            f"Alcance: {report.get('validation_scope', '')}" if report.get("validation_scope") else "",
+            metrics=[("errores", len(errs), "success" if valid else "error"), ("avisos", len(report.get("warnings", [])), "warning")],
+            findings=[
+                {
+                    "severity": "error",
+                    "title": str(e.get("message", "")),
+                    "location": str(e.get("path") or "(cuerpo)"),
+                    "detail": f"Regla: {e.get('rule', '')}",
+                    "hint": "Corrige ese campo en la respuesta o ajusta el contrato/esquema si el cambio es intencionado.",
+                }
+                for e in errs
+            ]
+            + [{"severity": "warning", "title": str(w)} for w in report.get("warnings", [])],
+            inputs=[(k, report[k]) for k in ("contract_file",) if report.get(k)],
+            truncated=bool(report.get("truncated")),
+        ),
+    }
     body = (
         f"<p>{pill('La respuesta cumple' if valid else 'La respuesta no cumple', 'ok' if valid else 'bad')}</p>"
         f"<p class='muted'>Alcance: {html.escape(str(report.get('validation_scope', '')))}</p>"
@@ -206,7 +291,7 @@ def run_validate_contract() -> int:
         SETTINGS.comparison_timeout,
     )
     report = {**report, "contract_file": name_c, "content_hash": spec.content_hash}
-    return render_validation(report, "Contract Guard · Validacion contra contrato")
+    return render_validation(report, "Contract Guard · Validacion contra contrato", "validate_contract")
 
 
 def run_validate_schema() -> int:
@@ -215,7 +300,7 @@ def run_validate_schema() -> int:
     report = validate_json_schema(
         parse_json("schema", name_s, raw_s), parse_json("response", name_r, raw_r), SETTINGS.comparison_timeout
     )
-    return render_validation(report, "Contract Guard · Validacion contra JSON Schema")
+    return render_validation(report, "Contract Guard · Validacion contra JSON Schema", "validate_schema")
 
 
 MODES = {
